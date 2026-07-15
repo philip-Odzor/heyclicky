@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 /// Owns the app-wide singletons and wires the hotkeys to the dictation flow.
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let appState = AppState()
 
