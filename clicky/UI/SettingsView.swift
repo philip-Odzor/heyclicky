@@ -25,17 +25,69 @@ private struct GeneralSettings: View {
 
     var body: some View {
         Form {
-            Section("Model") {
-                SecureField("OpenAI API key", text: $apiKey)
-                    .onAppear { apiKey = appState.settings.apiKey }
-                    .onChange(of: apiKey) { _, newValue in
-                        appState.settings.apiKey = newValue
+            Section("Model — any OpenAI-compatible endpoint (free keys OK)") {
+                Picker("Provider", selection: Binding(
+                    get: { appState.settings.provider },
+                    set: { appState.settings.provider = $0 }
+                )) {
+                    ForEach(LLMProvider.allCases) { Text($0.displayName).tag($0) }
+                }
+                TextField("Base URL (empty = provider default)", text: Binding(
+                    get: { appState.settings.baseURL },
+                    set: { appState.settings.baseURL = $0 }
+                ))
+                .textFieldStyle(.roundedBorder)
+                Text("Default: \(appState.settings.provider.defaultBaseURL.isEmpty ? "—" : appState.settings.provider.defaultBaseURL)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                if appState.settings.provider.requiresKey {
+                    SecureField("API key", text: $apiKey)
+                        .onAppear { apiKey = appState.settings.apiKey }
+                        .onChange(of: apiKey) { _, newValue in
+                            appState.settings.apiKey = newValue
+                        }
+                    if !appState.settings.provider.hermesEnvHint.isEmpty {
+                        Text("Reuse from ~/.hermes/.env: \(appState.settings.provider.hermesEnvHint)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
+                } else {
+                    Text("No key needed — runs on your machine.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    SecureField("API key (optional)", text: $apiKey)
+                        .onAppear { apiKey = appState.settings.apiKey }
+                        .onChange(of: apiKey) { _, newValue in
+                            appState.settings.apiKey = newValue
+                        }
+                }
                 TextField("Model", text: Binding(
                     get: { appState.settings.model },
                     set: { appState.settings.model = $0 }
                 ))
-                Text("Used only for screen-aware writing. Dictation runs on-device.")
+                Text("Default: \(appState.settings.provider.defaultModel). Used only for screen-aware writing. Dictation runs on-device.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Voice replies — free on-device voice, no ElevenLabs") {
+                Toggle("Speak replies aloud", isOn: Binding(
+                    get: { appState.settings.voiceReply },
+                    set: { appState.settings.voiceReply = $0 }
+                ))
+                Toggle("Speak as it generates (streaming)", isOn: Binding(
+                    get: { appState.settings.streamVoice },
+                    set: { appState.settings.streamVoice = $0 }
+                ))
+                HStack {
+                    Text("Rate")
+                    Slider(value: Binding(
+                        get: { appState.settings.speechRate },
+                        set: { appState.settings.speechRate = $0 }
+                    ), in: 0.3...1.0)
+                }
+                Text("Hold your trigger again to interrupt the voice (barge-in).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

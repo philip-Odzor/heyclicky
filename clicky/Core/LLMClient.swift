@@ -10,18 +10,41 @@ struct WriteRequest {
 
 protocol LLMProviding {
     func write(_ request: WriteRequest) async throws -> String
+    /// Streams the reply, calling onSentence for each finished sentence so
+    /// voice can overlap generation. Default: one call with the full text.
+    func writeStreaming(
+        _ request: WriteRequest,
+        onSentence: @escaping @Sendable (String) -> Void
+    ) async throws -> String
 }
 
-/// Calls OpenAI's Chat Completions API with the screenshot attached so the
-/// model can produce text that fits what's on screen.
+extension LLMProviding {
+    func writeStreaming(
+        _ request: WriteRequest,
+        onSentence: @escaping @Sendable (String) -> Void
+    ) async throws -> String {
+        let full = try await write(request)
+        for sentence in SpeechResponder.sentences(from: full) {
+            onSentence(sentence)
+        }
+        return full
+    }
+}
+
+/// Calls any OpenAI-compatible Chat Completions API with the screenshot
+/// attached so the model can produce text that fits what's on screen.
+/// Works with OpenAI, OpenRouter, Groq, Gemini (OpenAI-compat), Ollama,
+/// and a local Hermes API server — same JSON shape, different baseURL.
 struct OpenAIClient: LLMProviding {
     let apiKey: String
     let model: String
+    var baseURL: URL = URL(string: "https://api.openai.com/v1/chat/completions")!
 
-    private let endpoint = URL(string: "https://api.openai.com/v1/chat/completions")!
+    private var endpoint: URL { baseURL }
 
     func write(_ request: WriteRequest) async throws -> String {
-        guard !apiKey.isEmpty else { throw LLMError.missingKey }
+        guard !model.isEmpty else { throw LLMError.missingKey }
+        if providerNeedsKey && apiKey.isEmpty { throw LLMError.missingKey }
 
         var content: [[String: Any]] = [
             ["type": "text", "text": userPrompt(for: request)]
@@ -46,7 +69,11 @@ struct OpenAIClient: LLMProviding {
         var urlRequest = URLRequest(url: endpoint)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if !apiKey.isEmpty {
+            urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        // OpenRouter needs these; harmless everywhere else.
+        urlRequest.setValue("heyclicky/1.0", forHTTPHeaderField: "X-Title")
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await URLSession.shared.data(for: urlRequest)
@@ -60,6 +87,88 @@ struct OpenAIClient: LLMProviding {
             throw LLMError.emptyResponse
         }
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func writeStreaming(
+        _ request: WriteRequest,
+        onSentence: @escaping @Sendable (String) -> Void
+    ) async throws -> String {
+        guard !model.isEmpty else { throw LLMError.missingKey }
+        if providerNeedsKey && apiKey.isEmpty { throw LLMError.missingKey }
+
+        var content: [[String: Any]] = [
+            ["type": "text", "text": userPrompt(for: request)]
+        ]
+        if let jpeg = request.screenshotJPEG {
+            let base64 = jpeg.base64EncodedString()
+            content.append([
+                "type": "image_url",
+                "image_url": ["url": "data:image/jpeg;base64,\(base64)"]
+            ])
+        }
+
+        let body: [String: Any] = [
+            "model": model,
+            "temperature": 0.4,
+            "stream": true,
+            "messages": [
+                ["role": "system", "content": systemPrompt(for: request)],
+                ["role": "user", "content": content]
+            ]
+        ]
+
+        var urlRequest = URLRequest(url: endpoint)
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        if !apiKey.isEmpty {
+            urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        urlRequest.setValue("heyclicky/1.0", forHTTPHeaderField: "X-Title")
+        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode) else {
+            throw LLMError.badResponse
+        }
+
+        var full = ""
+        var pending = ""
+        for try await line in bytes.lines {
+            guard line.hasPrefix("data:") else { continue }
+            let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            if payload == "[DONE]" { break }
+            guard let data = payload.data(using: .utf8),
+                  let chunk = try? JSONDecoder().decode(ChatStreamChunk.self, from: data),
+                  let delta = chunk.choices.first?.delta.content,
+                  !delta.isEmpty else { continue }
+            full += delta
+            pending += delta
+            // Emit finished sentences as they arrive; hold back the tail
+            // unless it already ends with a terminator.
+            let endsTerminated = pending.last.map { ".!?\n".contains($0) } ?? false
+            var sentences = SpeechResponder.sentences(from: pending)
+            guard !sentences.isEmpty else { continue }
+            let holdBack = endsTerminated ? [] : [sentences.removeLast()]
+            for s in sentences {
+                onSentence(s)
+            }
+            pending = holdBack.first ?? ""
+        }
+        // Flush remainder.
+        for sentence in SpeechResponder.sentences(from: pending) {
+            onSentence(sentence)
+        }
+        let trimmed = full.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw LLMError.emptyResponse }
+        return trimmed
+    }
+
+    /// Local endpoints (Ollama / Hermes proxy) allow empty keys.
+    private var providerNeedsKey: Bool {
+        let host = endpoint.host?.lowercased() ?? ""
+        return !(host == "localhost" || host == "127.0.0.1")
     }
 
     private func systemPrompt(for request: WriteRequest) -> String {
@@ -98,6 +207,12 @@ struct OpenAIClient: LLMProviding {
         struct Message: Decodable { let content: String }
         let choices: [Choice]
     }
+
+    private struct ChatStreamChunk: Decodable {
+        struct Choice: Decodable { let delta: Delta }
+        struct Delta: Decodable { let content: String? }
+        let choices: [Choice]
+    }
 }
 
 /// Used for previews and when no API key is configured, so the flow is still
@@ -117,7 +232,7 @@ enum LLMError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .missingKey: return "Add your OpenAI API key in Settings to use screen-aware writing."
+        case .missingKey: return "Add a model API key in Settings (or use Ollama / Hermes local, no key) to use screen-aware writing."
         case .badResponse: return "Unexpected response from the model."
         case .emptyResponse: return "The model returned nothing."
         case .server(let status, _): return "The model request failed (HTTP \(status))."

@@ -22,7 +22,7 @@ struct MenuBarContent: View {
             Divider()
 
             if !appState.settings.hasAPIKey {
-                Button("Add OpenAI key for screen-aware writing…") { openSettings() }
+                Button("Add model key for screen-aware writing…") { openSettings() }
             }
 
             Button("Settings…") { openSettings() }
