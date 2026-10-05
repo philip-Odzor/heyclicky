@@ -29,6 +29,40 @@ enum TriggerKey: String, CaseIterable, Identifiable, Codable {
     }
 }
 
+/// Which speech-to-text engine records your voice.
+enum STTEngine: String, CaseIterable, Identifiable, Codable {
+    case apple
+    case groqWhisper
+    case localCommand
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .apple: return "Apple on-device (free, offline)"
+        case .groqWhisper: return "Groq Whisper (free tier)"
+        case .localCommand: return "Local command (whisper.cpp, etc.)"
+        }
+    }
+}
+
+/// Which voice speaks replies back.
+enum TTSEngine: String, CaseIterable, Identifiable, Codable {
+    case system
+    case edge
+    case piper
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .system: return "macOS system voice (free, offline)"
+        case .edge: return "Edge TTS (free, no key)"
+        case .piper: return "Piper local (free, offline)"
+        }
+    }
+}
+
 /// An OpenAI-compatible chat-completions endpoint. Every provider below
 /// speaks the same shape, so free keys (Groq, Gemini, OpenRouter) and local
 /// servers (Ollama, Hermes API server) work with zero extra code.
@@ -157,26 +191,117 @@ final class Settings: ObservableObject {
     @Published var speechRate: Double {
         didSet { defaults.set(speechRate, forKey: Keys.speechRate) }
     }
+    /// AVSpeechUtterance pitch 0.5...2.0. Piper ignores this.
+    @Published var speechPitch: Double {
+        didSet { defaults.set(speechPitch, forKey: Keys.speechPitch) }
+    }
     /// AVSpeechSynthesisVoice identifier. Empty = system default.
     @Published var voiceIdentifier: String {
         didSet { defaults.set(voiceIdentifier, forKey: Keys.voiceIdentifier) }
     }
 
-    /// API key, stored in the Keychain. Shared across providers; paste any
-    /// free key (Groq, Gemini, OpenRouter). Empty is fine for Ollama / Hermes.
+    // MARK: - Voice tab: engines are per-user, local-only, never synced.
+
+    @Published var sttEngine: STTEngine {
+        didSet { defaults.set(sttEngine.rawValue, forKey: Keys.sttEngine) }
+    }
+    /// Groq transcription model.
+    @Published var groqSTTModel: String {
+        didSet { defaults.set(groqSTTModel, forKey: Keys.groqSTTModel) }
+    }
+    /// Shell template for local STT. `{audio}` = recorded WAV path.
+    /// Stdout is used as the transcript.
+    @Published var localSTTCommand: String {
+        didSet { defaults.set(localSTTCommand, forKey: Keys.localSTTCommand) }
+    }
+    @Published var ttsEngine: TTSEngine {
+        didSet { defaults.set(ttsEngine.rawValue, forKey: Keys.ttsEngine) }
+    }
+    /// Edge voice, e.g. en-US-AriaNeural. 322 voices, 74 languages.
+    @Published var edgeVoice: String {
+        didSet { defaults.set(edgeVoice, forKey: Keys.edgeVoice) }
+    }
+    /// `edge-tts` executable name or absolute path.
+    @Published var edgeBinary: String {
+        didSet { defaults.set(edgeBinary, forKey: Keys.edgeBinary) }
+    }
+    /// `piper` executable name or absolute path.
+    @Published var piperBinary: String {
+        didSet { defaults.set(piperBinary, forKey: Keys.piperBinary) }
+    }
+    /// Absolute path to a Piper voice model (.onnx).
+    @Published var piperModel: String {
+        didSet { defaults.set(piperModel, forKey: Keys.piperModel) }
+    }
+    /// Piper speaker index. -1 omits --speaker (single-speaker voices).
+    @Published var piperSpeaker: Int {
+        didSet { defaults.set(piperSpeaker, forKey: Keys.piperSpeaker) }
+    }
+
+    // MARK: - Conversation: hands-free behaviour.
+
+    /// After a reply, listen again automatically (wake-word sessions).
+    @Published var continuousMode: Bool {
+        didSet { defaults.set(continuousMode, forKey: Keys.continuousMode) }
+    }
+    /// Auto-finish listening after this many seconds of silence.
+    /// Needed hands-free; harmless for push-to-talk.
+    @Published var silenceDuration: Double {
+        didSet { defaults.set(silenceDuration, forKey: Keys.silenceDuration) }
+    }
+    @Published var silenceAutoStop: Bool {
+        didSet { defaults.set(silenceAutoStop, forKey: Keys.silenceAutoStop) }
+    }
+    /// Saying exactly this (case-insensitive) ends a hands-free session.
+    /// Empty disables.
+    @Published var stopPhrase: String {
+        didSet { defaults.set(stopPhrase, forKey: Keys.stopPhrase) }
+    }
+
+    // MARK: - Wake word: fully hands-free, opt-in (mic indicator stays on).
+
+    @Published var wakeEnabled: Bool {
+        didSet { defaults.set(wakeEnabled, forKey: Keys.wakeEnabled) }
+    }
+    /// Custom name to listen for, e.g. "hey clicky" or "jarvis".
+    @Published var wakePhrase: String {
+        didSet { defaults.set(wakePhrase, forKey: Keys.wakePhrase) }
+    }
+
+    /// API key for the current LLM provider, stored in the Keychain.
+    /// Each provider has its own slot, so Groq and Gemini keys never collide.
     var apiKey: String {
-        get {
-            if let v = Keychain.shared.string(for: Keys.apiKey), !v.isEmpty { return v }
-            // Migrate the old OpenAI-only key once.
-            return Keychain.shared.string(for: Keys.legacyOpenAIKey) ?? ""
-        }
+        get { apiKey(for: provider) }
         set {
-            if newValue.isEmpty {
-                Keychain.shared.delete(Keys.apiKey)
-            } else {
-                Keychain.shared.set(newValue, for: Keys.apiKey)
-            }
+            setApiKey(newValue, for: provider)
             objectWillChange.send()
+        }
+    }
+
+    /// Groq key in its own slot. Used by Groq Whisper STT even when the LLM
+    /// provider is something else (Ollama, Hermes, …).
+    var groqKey: String {
+        get { apiKey(for: .groq) }
+        set {
+            setApiKey(newValue, for: .groq)
+            objectWillChange.send()
+        }
+    }
+
+    func apiKey(for p: LLMProvider) -> String {
+        let slot = Keys.keySlot(for: p)
+        if let v = Keychain.shared.string(for: slot), !v.isEmpty { return v }
+        // Migrate once from the old shared slots.
+        if let v = Keychain.shared.string(for: Keys.apiKey), !v.isEmpty { return v }
+        return Keychain.shared.string(for: Keys.legacyOpenAIKey) ?? ""
+    }
+
+    func setApiKey(_ value: String, for p: LLMProvider) {
+        let slot = Keys.keySlot(for: p)
+        if value.isEmpty {
+            Keychain.shared.delete(slot)
+        } else {
+            Keychain.shared.set(value, for: slot)
         }
     }
 
@@ -221,7 +346,26 @@ final class Settings: ObservableObject {
         streamVoice = defaults.object(forKey: Keys.streamVoice) as? Bool ?? true
         let storedRate = defaults.object(forKey: Keys.speechRate) as? Double
         speechRate = storedRate ?? 0.5
+        let storedPitch = defaults.object(forKey: Keys.speechPitch) as? Double
+        speechPitch = storedPitch ?? 1.0
         voiceIdentifier = defaults.string(forKey: Keys.voiceIdentifier) ?? ""
+        sttEngine = STTEngine(rawValue: defaults.string(forKey: Keys.sttEngine) ?? "") ?? .apple
+        groqSTTModel = defaults.string(forKey: Keys.groqSTTModel) ?? "whisper-large-v3-turbo"
+        localSTTCommand = defaults.string(forKey: Keys.localSTTCommand) ?? ""
+        ttsEngine = TTSEngine(rawValue: defaults.string(forKey: Keys.ttsEngine) ?? "") ?? .system
+        edgeVoice = defaults.string(forKey: Keys.edgeVoice) ?? "en-US-AriaNeural"
+        edgeBinary = defaults.string(forKey: Keys.edgeBinary) ?? "edge-tts"
+        piperBinary = defaults.string(forKey: Keys.piperBinary) ?? "piper"
+        piperModel = defaults.string(forKey: Keys.piperModel) ?? ""
+        piperSpeaker = defaults.object(forKey: Keys.piperSpeaker) as? Int ?? -1
+        continuousMode = defaults.object(forKey: Keys.continuousMode) as? Bool ?? false
+        let storedSilence = defaults.object(forKey: Keys.silenceDuration) as? Double
+        silenceDuration = storedSilence ?? 2.5
+        silenceAutoStop = defaults.object(forKey: Keys.silenceAutoStop) as? Bool ?? true
+        stopPhrase = defaults.string(forKey: Keys.stopPhrase) ?? "stop"
+        wakeEnabled = defaults.object(forKey: Keys.wakeEnabled) as? Bool ?? false
+        let storedWake = defaults.string(forKey: Keys.wakePhrase)
+        wakePhrase = (storedWake?.isEmpty == false) ? storedWake! : "hey clicky"
     }
 
     private enum Keys {
@@ -237,8 +381,29 @@ final class Settings: ObservableObject {
         static let voiceReply = "voiceReply"
         static let streamVoice = "streamVoice"
         static let speechRate = "speechRate"
+        static let speechPitch = "speechPitch"
         static let voiceIdentifier = "voiceIdentifier"
+        static let sttEngine = "sttEngine"
+        static let groqSTTModel = "groqSTTModel"
+        static let localSTTCommand = "localSTTCommand"
+        static let ttsEngine = "ttsEngine"
+        static let edgeVoice = "edgeVoice"
+        static let edgeBinary = "edgeBinary"
+        static let piperBinary = "piperBinary"
+        static let piperModel = "piperModel"
+        static let piperSpeaker = "piperSpeaker"
+        static let continuousMode = "continuousMode"
+        static let silenceDuration = "silenceDuration"
+        static let silenceAutoStop = "silenceAutoStop"
+        static let stopPhrase = "stopPhrase"
+        static let wakeEnabled = "wakeEnabled"
+        static let wakePhrase = "wakePhrase"
         static let apiKey = "llm.apiKey"
         static let legacyOpenAIKey = "openai.apiKey"
+
+        /// Per-provider Keychain slot so keys never collide.
+        static func keySlot(for p: LLMProvider) -> String {
+            "llm.\(p.rawValue).apiKey"
+        }
     }
 }

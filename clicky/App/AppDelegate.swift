@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// Owns the app-wide singletons and wires the hotkeys to the dictation flow.
@@ -8,6 +9,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var hotkeyManager: HotkeyManager?
     private var pill: PillController?
+    private var wakeListener: WakeWordListener?
+    private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Menu-bar accessory app: no Dock icon, no main window.
@@ -29,8 +32,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // accessibility are surfaced lazily the first time they're needed.
         Task { await appState.controller.prepare() }
 
+        // Wake word (opt-in): re-apply whenever the phase settles or the
+        // user flips the toggle in Settings.
+        let listener = WakeWordListener()
+        listener.onWake = { [weak self] in
+            Task { @MainActor in
+                self?.appState.controller.beginHandsFree()
+            }
+        }
+        self.wakeListener = listener
+        appState.$phase
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    self?.applyWakePolicy()
+                }
+            }
+            .store(in: &cancellables)
+        // objectWillChange fires before the new value lands; defer a beat.
+        appState.settings.objectWillChange
+            .sink { [weak self] _ in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    self?.applyWakePolicy()
+                }
+            }
+            .store(in: &cancellables)
+        applyWakePolicy()
+
         if appState.settings.showOnboarding {
             appState.presentOnboarding()
+        }
+    }
+
+    /// The wake listener only holds the mic while clicky is otherwise idle:
+    /// never during a listen, a model run, or speech. Toggle lives in
+    /// Settings → Voice and applies immediately.
+    private func applyWakePolicy() {
+        guard let listener = wakeListener else { return }
+        let settings = appState.settings
+        guard settings.wakeEnabled else {
+            if listener.isListening { listener.stop() }
+            if appState.wakeListening { appState.wakeListening = false }
+            return
+        }
+        switch appState.phase {
+        case .idle, .done, .error:
+            let phrase = settings.wakePhrase.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !phrase.isEmpty else {
+                listener.stop()
+                appState.wakeListening = false
+                return
+            }
+            if !listener.isListening {
+                listener.start(phrases: [phrase])
+            } else {
+                listener.refresh(phrase: phrase)
+            }
+            if !appState.wakeListening { appState.wakeListening = true }
+        case .listening, .thinking, .writing:
+            if listener.isListening { listener.stop() }
+            if appState.wakeListening { appState.wakeListening = false }
         }
     }
 

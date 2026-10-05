@@ -18,6 +18,9 @@ struct MenuBarContent: View {
 
             Text("hold \(appState.settings.dictateTrigger.symbol) to dictate")
             Text("hold \(appState.settings.agentTrigger.symbol) to write with your screen")
+            if appState.settings.wakeEnabled {
+                Text("or say “\(appState.settings.wakePhrase)”")
+            }
 
             Divider()
 
@@ -38,6 +41,9 @@ struct MenuBarContent: View {
     }
 
     private var statusSummary: String {
+        if appState.wakeListening {
+            return "wake word on — say “\(appState.settings.wakePhrase)”"
+        }
         switch appState.phase {
         case .idle, .done: return "ready — \(appState.skills.skills.filter(\.enabled).count) skills on"
         case .listening: return "listening…"

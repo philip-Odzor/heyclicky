@@ -32,6 +32,8 @@ final class AppState: ObservableObject {
     @Published var contextAppName: String = ""
     @Published var contextAppIcon: NSImage?
     @Published var lastResult: String = ""
+    /// True while the wake-word listener holds the mic (opt-in, Settings).
+    @Published var wakeListening = false
 
     let settings = Settings()
     let skills = SkillStore()

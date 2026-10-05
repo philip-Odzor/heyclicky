@@ -7,6 +7,8 @@ final class SpeechResponder: NSObject, ObservableObject {
 
     /// AVSpeechUtterance rate 0.0...1.0. 0.5 is the natural default.
     var rate: Float = 0.5
+    /// AVSpeechUtterance pitch 0.5...2.0. 1.0 is natural.
+    var pitch: Float = 1.0
     /// Optional AVSpeechSynthesisVoice identifier. nil = system default.
     var voiceIdentifier: String?
 
@@ -35,6 +37,7 @@ final class SpeechResponder: NSObject, ObservableObject {
         guard !cleaned.isEmpty else { return }
         let utterance = AVSpeechUtterance(string: cleaned)
         utterance.rate = rate
+        utterance.pitchMultiplier = pitch
         if let id = voiceIdentifier, !id.isEmpty,
            let voice = AVSpeechSynthesisVoice(identifier: id) {
             utterance.voice = voice

@@ -7,10 +7,14 @@ import AppKit
 final class DictationController {
     private unowned let appState: AppState
     private let engine = DictationEngine()
-    private let speaker = SpeechResponder()
+    private let voice = VoiceOutput()
     private var mode: DictationMode = .dictate
     private var context: FrontmostApp = .unknown
     private var runToken = 0
+    /// True when this session started hands-free (wake word / continuous).
+    private var handsFree = false
+    private var silentStreak = 0
+    private var listenGen = 0
 
     init(appState: AppState) {
         self.appState = appState
@@ -22,7 +26,7 @@ final class DictationController {
         _ = await engine.requestAuthorization()
     }
 
-    func begin(mode: DictationMode) {
+    func begin(mode: DictationMode, handsFree: Bool = false, bargeIn: Bool = true) {
         // Barge-in: a new hold from thinking/writing/done/error cancels the
         // in-flight reply (runToken) and interrupts spoken audio.
         switch appState.phase {
@@ -33,9 +37,12 @@ final class DictationController {
         }
 
         self.mode = mode
+        self.handsFree = handsFree
         runToken += 1
-        // Barge-in: a new hold interrupts any spoken reply.
-        speaker.stop()
+        listenGen += 1
+        // A new hold interrupts any spoken reply (barge-in). Chained
+        // continuous listens keep the reply playing underneath.
+        if bargeIn { voice.stop() }
 
         // Capture the app the user was in *before* our pill grabs any focus.
         context = FrontmostAppObserver.current()
@@ -44,6 +51,7 @@ final class DictationController {
         appState.transcript = ""
 
         engine.updateLocale(appState.settings.localeIdentifier)
+        configureEngineForCurrentSettings()
         engine.onLevel = { [weak self] level in self?.pushLevel(level) }
 
         guard Permissions.accessibilityAuthorized(prompt: true) else {
@@ -56,24 +64,99 @@ final class DictationController {
             appState.phase = .listening
             appState.pill?.show(mode: mode)
             if appState.settings.playSounds { Sounds.start() }
+            // Hands-free has no key release to end on: auto-finish on silence.
+            if appState.settings.silenceAutoStop {
+                startSilenceWatchdog()
+            }
         } catch {
             fail(error.localizedDescription)
         }
     }
 
+    /// Hands-free entry point used by the wake word ("hey clicky", …).
+    func beginHandsFree(mode: DictationMode = .agent) {
+        begin(mode: mode, handsFree: true)
+    }
+
+    /// Push the current Voice-tab STT settings into the engine.
+    private func configureEngineForCurrentSettings() {
+        let s = appState.settings
+        engine.sttEngine = s.sttEngine
+        engine.groqAPIKey = s.groqKey
+        engine.groqModel = s.groqSTTModel
+        // "en-US" -> "en" for Whisper; empty stays empty (auto-detect).
+        let locale = s.localeIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        engine.groqLanguage = locale.count >= 2 ? String(locale.prefix(2)).lowercased() : ""
+        engine.localSTTCommand = s.localSTTCommand
+    }
+
+    /// Auto-finish after `silenceDuration` of quiet mic. Cancelled by any
+    /// newer listen (listenGen), finish, or cancel.
+    private func startSilenceWatchdog() {
+        listenGen += 1
+        let gen = listenGen
+        let threshold: Float = 0.12
+        let started = Date()
+        var lastLoud = Date()
+        let minUtterance: TimeInterval = 1.2
+        Task { @MainActor in
+            while gen == self.listenGen, self.appState.phase == .listening {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                guard gen == self.listenGen else { return }
+                if self.engine.level > threshold { lastLoud = Date() }
+                let elapsed = Date().timeIntervalSince(started)
+                let silentFor = Date().timeIntervalSince(lastLoud)
+                if elapsed > minUtterance, silentFor >= self.appState.settings.silenceDuration {
+                    self.finish()
+                    return
+                }
+            }
+        }
+    }
+
     func finish() {
         guard appState.phase == .listening else { return }
+        listenGen += 1 // stop the silence watchdog; this run owns the rest.
+        // Starting your turn cuts the previous reply (barge-in).
+        voice.stop()
         let token = runToken
+        let wasHandsFree = handsFree
         Task {
-            let transcript = await engine.stop()
+            let transcript: String
+            do {
+                transcript = try await engine.stop()
+            } catch {
+                guard token == runToken else { return }
+                fail(error.localizedDescription)
+                return
+            }
             appState.transcript = transcript
             guard token == runToken else { return }
 
             let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else {
-                fail("I didn't catch that.")
+            // Stop phrase ends a hands-free session ("stop", "goodbye", …).
+            let stopWord = appState.settings.stopPhrase
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !stopWord.isEmpty, trimmed.lowercased() == stopWord {
+                endHandsFree()
                 return
             }
+            guard !trimmed.isEmpty else {
+                // Hands-free: a few silent turns end the session instead of
+                // erroring every time the room is quiet.
+                if wasHandsFree {
+                    silentStreak += 1
+                    if silentStreak >= 3 {
+                        endHandsFree()
+                    } else {
+                        begin(mode: .agent, handsFree: true, bargeIn: false)
+                    }
+                } else {
+                    fail("I didn't catch that.")
+                }
+                return
+            }
+            silentStreak = 0
 
             switch mode {
             case .dictate:
@@ -86,8 +169,21 @@ final class DictationController {
 
     func cancel() {
         runToken += 1
+        listenGen += 1
+        handsFree = false
+        silentStreak = 0
         engine.abort()
-        speaker.stop()
+        voice.stop()
+        appState.phase = .idle
+        appState.pill?.hide()
+    }
+
+    private func endHandsFree() {
+        runToken += 1
+        listenGen += 1
+        handsFree = false
+        silentStreak = 0
+        voice.stop()
         appState.phase = .idle
         appState.pill?.hide()
     }
@@ -149,18 +245,23 @@ final class DictationController {
     // MARK: - Completion
 
     private func speakNow(_ sentence: String) {
-        speaker.rate = Float(appState.settings.speechRate)
-        speaker.voiceIdentifier = appState.settings.voiceIdentifier.isEmpty
-            ? nil : appState.settings.voiceIdentifier
-        speaker.speakSentence(sentence)
+        voice.speakSentence(sentence, settings: appState.settings)
     }
 
     private func complete(with text: String, speak: Bool) {
         appState.lastResult = text
         TextInserter.insert(text)
         if speak && appState.settings.voiceReply {
-            speakNow(text)
+            voice.speak(text, settings: appState.settings)
         }
+        // Continuous hands-free conversation: listen again right away.
+        // The hide timer below sees .listening and skips itself.
+        if appState.settings.continuousMode, handsFree, mode == .agent {
+            begin(mode: .agent, handsFree: true, bargeIn: false)
+            return
+        }
+        handsFree = false
+        silentStreak = 0
         appState.phase = .done
         if appState.settings.playSounds { Sounds.done() }
         appState.pill?.update()
@@ -173,6 +274,10 @@ final class DictationController {
 
     private func fail(_ message: String) {
         engine.abort()
+        // A failed turn ends a hands-free chain (avoids error loops on a
+        // bad key). The wake word can start a fresh session.
+        handsFree = false
+        silentStreak = 0
         appState.phase = .error(message)
         if appState.settings.playSounds { Sounds.error() }
         appState.pill?.update()

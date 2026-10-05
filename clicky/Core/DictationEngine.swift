@@ -17,6 +17,17 @@ final class DictationEngine: ObservableObject {
     private var task: SFSpeechRecognitionTask?
     private var isRunning = false
 
+    // MARK: - Alternate STT engines (Groq Whisper / local command)
+
+    /// Set by the controller before start(). .apple keeps the on-device path.
+    var sttEngine: STTEngine = .apple
+    var groqAPIKey: String = ""
+    var groqModel: String = "whisper-large-v3-turbo"
+    var groqLanguage: String = ""
+    var localSTTCommand: String = ""
+    private var audioFile: AVAudioFile?
+    private var recordingURL: URL?
+
     func updateLocale(_ identifier: String) {
         recognizer = SFSpeechRecognizer(locale: Locale(identifier: identifier))
     }
@@ -37,6 +48,32 @@ final class DictationEngine: ObservableObject {
     func start() throws {
         guard !isRunning else { return }
         transcript = ""
+
+        // File path: record raw mic audio, transcribe on stop.
+        if sttEngine != .apple {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("clicky-stt-\(UUID().uuidString).wav")
+            let input = audioEngine.inputNode
+            let format = input.outputFormat(forBus: 0)
+            do {
+                audioFile = try AVAudioFile(forWriting: url, settings: format.settings)
+            } catch {
+                throw DictationError.recordingFailed
+            }
+            recordingURL = url
+            input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+                try? self?.audioFile?.write(buffer)
+                let level = Self.rms(buffer)
+                Task { @MainActor in
+                    self?.level = level
+                    self?.onLevel?(level)
+                }
+            }
+            audioEngine.prepare()
+            try audioEngine.start()
+            isRunning = true
+            return
+        }
 
         if recognizer == nil {
             recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
@@ -75,9 +112,42 @@ final class DictationEngine: ObservableObject {
     }
 
     /// Stops capture and returns the best available transcript.
-    func stop() async -> String {
+    /// Throws for the file engines when recording or transcription fails.
+    func stop() async throws -> String {
         guard isRunning else { return transcript }
         isRunning = false
+
+        // File path: finalize the WAV, transcribe it, clean up.
+        if sttEngine != .apple {
+            audioEngine.inputNode.removeTap(onBus: 0)
+            audioEngine.stop()
+            audioFile = nil
+            level = 0
+            guard let url = recordingURL else { return transcript }
+            recordingURL = nil
+            defer { try? FileManager.default.removeItem(at: url) }
+            switch sttEngine {
+            case .apple:
+                return transcript
+            case .groqWhisper:
+                let text = try await VoiceProviders.groqTranscribe(
+                    audioURL: url,
+                    apiKey: groqAPIKey,
+                    model: groqModel,
+                    language: groqLanguage
+                )
+                transcript = text
+                return text
+            case .localCommand:
+                let text = try await VoiceProviders.localTranscribe(
+                    commandTemplate: localSTTCommand,
+                    audioURL: url
+                )
+                transcript = text
+                return text
+            }
+        }
+
         audioEngine.inputNode.removeTap(onBus: 0)
         audioEngine.stop()
         request?.endAudio()
@@ -101,6 +171,11 @@ final class DictationEngine: ObservableObject {
         task?.cancel()
         task = nil
         request = nil
+        audioFile = nil
+        if let url = recordingURL {
+            recordingURL = nil
+            try? FileManager.default.removeItem(at: url)
+        }
         transcript = ""
         level = 0
     }
@@ -120,11 +195,13 @@ final class DictationEngine: ObservableObject {
 
 enum DictationError: LocalizedError {
     case recognizerUnavailable
+    case recordingFailed
     case emptyTranscript
 
     var errorDescription: String? {
         switch self {
         case .recognizerUnavailable: return "Speech recognition isn't available for this language."
+        case .recordingFailed: return "Couldn't start the microphone recording."
         case .emptyTranscript: return "I didn't catch that."
         }
     }
