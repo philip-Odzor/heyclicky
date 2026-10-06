@@ -6,6 +6,8 @@ struct WriteRequest {
     let app: FrontmostApp
     let screenshotJPEG: Data?
     let skills: [Skill]
+    /// Local-only recalled memories (MemoryStore). Empty = none.
+    var memories: [String] = []
 }
 
 protocol LLMProviding {
@@ -192,6 +194,12 @@ struct OpenAIClient: LLMProviding {
             prompt += "\n\nRelevant skills the user has enabled:\n"
             for skill in request.skills {
                 prompt += "\n## \(skill.name)\n\(skill.body)\n"
+            }
+        }
+        if !request.memories.isEmpty {
+            prompt += "\n\nLocal memory (user's own past turns, local-only — prefer it over guessing):\n"
+            for m in request.memories.prefix(8) {
+                prompt += "\n- \(m)\n"
             }
         }
         return prompt

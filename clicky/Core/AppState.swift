@@ -34,9 +34,12 @@ final class AppState: ObservableObject {
     @Published var lastResult: String = ""
     /// True while the wake-word listener holds the mic (opt-in, Settings).
     @Published var wakeListening = false
+    /// Boss-key active: pill forced invisible until next run.
+    @Published var stealthHidden = false
 
     let settings = Settings()
     let skills = SkillStore()
+    let memory = MemoryStore()
 
     lazy var controller = DictationController(appState: self)
 
@@ -46,6 +49,17 @@ final class AppState: ObservableObject {
     private var onboarding: NSWindow?
 
     var menuBarSymbol: String {
+        // Stealth: inconspicuous dot when idle. Busy states still show
+        // so the user knows a run is in flight.
+        if settings.stealthEnabled && settings.hideMenuBarIcon {
+            switch phase {
+            case .idle, .done:
+                if wakeListening { return "circle.fill" }
+                return "circle"
+            default:
+                break
+            }
+        }
         switch phase {
         case .idle, .done: return "waveform"
         case .listening: return "waveform.circle.fill"

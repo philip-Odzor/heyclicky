@@ -19,7 +19,7 @@ struct ClickyApp: App {
         Settings {
             SettingsView()
                 .environmentObject(appDelegate.appState)
-                .frame(width: 620, height: 460)
+                .frame(width: 640, height: 520)
         }
     }
 }

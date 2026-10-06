@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotkeyManager: HotkeyManager?
     private var pill: PillController?
     private var wakeListener: WakeWordListener?
+    private var bossMonitor: Any?
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -57,6 +58,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
         applyWakePolicy()
+
+        // Boss-key (opt-in): Cmd+Shift+H cancels any run and hides the pill.
+        // The next begin() clears stealthHidden so clicky comes back.
+        bossMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.appState.settings.bossKeyEnabled else { return }
+                if event.modifierFlags.contains(.command),
+                   event.modifierFlags.contains(.shift),
+                   event.charactersIgnoringModifiers?.lowercased() == "h" {
+                    self.appState.controller.cancel()
+                    self.appState.stealthHidden = true
+                    self.appState.pill?.hide()
+                }
+            }
+        }
 
         if appState.settings.showOnboarding {
             appState.presentOnboarding()

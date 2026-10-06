@@ -268,6 +268,34 @@ final class Settings: ObservableObject {
         didSet { defaults.set(wakePhrase, forKey: Keys.wakePhrase) }
     }
 
+    // MARK: - Stealth: discreet, not covert (OS indicators stay on).
+
+    /// Discreet mode: tiny menu icon, minimal pill, no sounds.
+    @Published var stealthEnabled: Bool {
+        didSet { defaults.set(stealthEnabled, forKey: Keys.stealthEnabled) }
+    }
+    @Published var hideMenuBarIcon: Bool {
+        didSet { defaults.set(hideMenuBarIcon, forKey: Keys.hideMenuBarIcon) }
+    }
+    @Published var minimalPill: Bool {
+        didSet { defaults.set(minimalPill, forKey: Keys.minimalPill) }
+    }
+    /// Cmd+Shift+H instantly cancels and hides (boss-key).
+    @Published var bossKeyEnabled: Bool {
+        didSet { defaults.set(bossKeyEnabled, forKey: Keys.bossKeyEnabled) }
+    }
+
+    // MARK: - Memory: always remember, per-user local-only.
+
+    @Published var memoryEnabled: Bool {
+        didSet { defaults.set(memoryEnabled, forKey: Keys.memoryEnabled) }
+    }
+    /// Custom memory folder. Empty = default (Application Support).
+    /// Point at an Obsidian vault subfolder to browse memories there.
+    @Published var memoryFolder: String {
+        didSet { defaults.set(memoryFolder, forKey: Keys.memoryFolder) }
+    }
+
     /// API key for the current LLM provider, stored in the Keychain.
     /// Each provider has its own slot, so Groq and Gemini keys never collide.
     var apiKey: String {
@@ -366,7 +394,16 @@ final class Settings: ObservableObject {
         wakeEnabled = defaults.object(forKey: Keys.wakeEnabled) as? Bool ?? false
         let storedWake = defaults.string(forKey: Keys.wakePhrase)
         wakePhrase = (storedWake?.isEmpty == false) ? storedWake! : "hey clicky"
+        stealthEnabled = defaults.object(forKey: Keys.stealthEnabled) as? Bool ?? false
+        hideMenuBarIcon = defaults.object(forKey: Keys.hideMenuBarIcon) as? Bool ?? true
+        minimalPill = defaults.object(forKey: Keys.minimalPill) as? Bool ?? true
+        bossKeyEnabled = defaults.object(forKey: Keys.bossKeyEnabled) as? Bool ?? true
+        memoryEnabled = defaults.object(forKey: Keys.memoryEnabled) as? Bool ?? true
+        memoryFolder = defaults.string(forKey: Keys.memoryFolder) ?? ""
     }
+
+    /// Sounds are auto-muted in stealth mode (discreet, not silent-spy).
+    var soundsAllowed: Bool { playSounds && !stealthEnabled }
 
     private enum Keys {
         static let dictateTrigger = "dictateTrigger"
@@ -398,6 +435,12 @@ final class Settings: ObservableObject {
         static let stopPhrase = "stopPhrase"
         static let wakeEnabled = "wakeEnabled"
         static let wakePhrase = "wakePhrase"
+        static let stealthEnabled = "stealthEnabled"
+        static let hideMenuBarIcon = "hideMenuBarIcon"
+        static let minimalPill = "minimalPill"
+        static let bossKeyEnabled = "bossKeyEnabled"
+        static let memoryEnabled = "memoryEnabled"
+        static let memoryFolder = "memoryFolder"
         static let apiKey = "llm.apiKey"
         static let legacyOpenAIKey = "openai.apiKey"
 

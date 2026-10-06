@@ -40,6 +40,8 @@ final class DictationController {
         self.handsFree = handsFree
         runToken += 1
         listenGen += 1
+        // A new explicit run clears the boss-key hide.
+        appState.stealthHidden = false
         // A new hold interrupts any spoken reply (barge-in). Chained
         // continuous listens keep the reply playing underneath.
         if bargeIn { voice.stop() }
@@ -63,7 +65,7 @@ final class DictationController {
             try engine.start()
             appState.phase = .listening
             appState.pill?.show(mode: mode)
-            if appState.settings.playSounds { Sounds.start() }
+            if appState.settings.soundsAllowed { Sounds.start() }
             // Hands-free has no key release to end on: auto-finish on silence.
             if appState.settings.silenceAutoStop {
                 startSilenceWatchdog()
@@ -198,11 +200,15 @@ final class DictationController {
             ? await ScreenContextProvider.captureScreenshotJPEG()
             : nil
 
+        let memories: [String] = appState.settings.memoryEnabled
+            ? appState.memory.recall(for: instruction)
+            : []
         let request = WriteRequest(
             instruction: instruction,
             app: context,
             screenshotJPEG: screenshot,
-            skills: appState.skills.skills(for: context)
+            skills: appState.skills.skills(for: context),
+            memories: memories
         )
 
         let client: LLMProviding = appState.settings.makeLLMClient()
@@ -226,6 +232,9 @@ final class DictationController {
                 appState.pill?.update()
                 try? await Task.sleep(nanoseconds: 150_000_000)
                 // Already spoken chunk-by-chunk; just paste, don't re-speak.
+                if appState.settings.memoryEnabled {
+                    appState.memory.remember(instruction: instruction, output: result, app: context.name)
+                }
                 complete(with: result, speak: false)
                 return
             }
@@ -235,6 +244,9 @@ final class DictationController {
             appState.phase = .writing
             appState.pill?.update()
             try? await Task.sleep(nanoseconds: 150_000_000)
+            if appState.settings.memoryEnabled {
+                appState.memory.remember(instruction: instruction, output: result, app: context.name)
+            }
             complete(with: result, speak: appState.settings.voiceReply)
         } catch {
             guard token == runToken else { return }
@@ -263,7 +275,7 @@ final class DictationController {
         handsFree = false
         silentStreak = 0
         appState.phase = .done
-        if appState.settings.playSounds { Sounds.done() }
+        if appState.settings.soundsAllowed { Sounds.done() }
         appState.pill?.update()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
             guard let self, self.appState.phase == .done else { return }
@@ -279,7 +291,7 @@ final class DictationController {
         handsFree = false
         silentStreak = 0
         appState.phase = .error(message)
-        if appState.settings.playSounds { Sounds.error() }
+        if appState.settings.soundsAllowed { Sounds.error() }
         appState.pill?.update()
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
             guard let self else { return }

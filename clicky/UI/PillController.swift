@@ -33,6 +33,8 @@ final class PillController {
     }
 
     func show(mode: DictationMode) {
+        // Boss-key active: stay invisible until the next explicit run.
+        if appState.stealthHidden { return }
         position()
         panel.alphaValue = 0
         panel.orderFrontRegardless()

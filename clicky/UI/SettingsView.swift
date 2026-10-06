@@ -12,6 +12,10 @@ struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
             VoiceSettings()
                 .tabItem { Label("Voice", systemImage: "waveform") }
+            StealthSettings()
+                .tabItem { Label("Stealth", systemImage: "eye.slash") }
+            MemorySettings()
+                .tabItem { Label("Memory", systemImage: "brain") }
             SkillsSettings()
                 .tabItem { Label("Skills", systemImage: "sparkles") }
             PermissionsSettings()
@@ -383,6 +387,89 @@ private struct VoiceSettings: View {
                 showTtsError = true
             }
         }
+    }
+}
+
+private struct StealthSettings: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        Form {
+            Section("Discreet mode — quiet UI, never covert") {
+                Toggle("Stealth mode", isOn: Binding(
+                    get: { appState.settings.stealthEnabled },
+                    set: { appState.settings.stealthEnabled = $0 }
+                ))
+                Toggle("Inconspicuous menu icon", isOn: Binding(
+                    get: { appState.settings.hideMenuBarIcon },
+                    set: { appState.settings.hideMenuBarIcon = $0 }
+                ))
+                Toggle("Minimal pill", isOn: Binding(
+                    get: { appState.settings.minimalPill },
+                    set: { appState.settings.minimalPill = $0 }
+                ))
+                Toggle("Boss-key (Cmd+Shift+H hides)", isOn: Binding(
+                    get: { appState.settings.bossKeyEnabled },
+                    set: { appState.settings.bossKeyEnabled = $0 }
+                ))
+                Text("Sounds auto-mute in stealth. Any new run brings clicky back.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Limits") {
+                Text("macOS always shows the mic / screen-recording indicators while listening or capturing. Stealth cannot and does not hide those — by design.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if appState.stealthHidden {
+                    Text("Boss-key active — pill hidden. Hold a trigger to come back.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+private struct MemorySettings: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        Form {
+            Section("Always remember — local-only") {
+                Toggle("Remember turns", isOn: Binding(
+                    get: { appState.settings.memoryEnabled },
+                    set: { appState.settings.memoryEnabled = $0 }
+                ))
+                TextField("Folder (empty = default)", text: Binding(
+                    get: { appState.settings.memoryFolder },
+                    set: { appState.settings.memoryFolder = $0 }
+                ))
+                .textFieldStyle(.roundedBorder)
+                Text("Default: ~/Library/Application Support/clicky/Memory. Point at an Obsidian vault subfolder (e.g. ~/Obsidian Vault/Clicky) to browse the same .md files there.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("Open Folder") {
+                        NSWorkspace.shared.open(appState.memory.directoryURL)
+                    }
+                    Button("Refresh") {
+                        appState.memory.refreshCount()
+                        appState.objectWillChange.send()
+                    }
+                    Spacer()
+                    Text("\(appState.memory.entryCount) days")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Section("How it works") {
+                Text("Each agent turn appends to YYYY-MM-DD.md. Recall is keyword-overlap over the last 14 days, injected into the system prompt. No embeddings, no network.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 

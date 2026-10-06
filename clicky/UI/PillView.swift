@@ -8,6 +8,48 @@ struct PillView: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
+        // Boss-key: render nothing (panel stays hidden by controller too).
+        if appState.stealthHidden {
+            EmptyView()
+        } else if appState.settings.stealthEnabled && appState.settings.minimalPill {
+            minimalBody
+        } else {
+            fullBody
+        }
+    }
+
+    /// Discreet pill: small dot + short status, no app chip, no shadow.
+    private var minimalBody: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(accent)
+                .frame(width: 7, height: 7)
+            Text(shortStatus)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.85))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: 220, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(.black.opacity(0.82))
+        )
+        .foregroundStyle(.white)
+    }
+
+    private var shortStatus: String {
+        switch appState.phase {
+        case .idle: return "ready"
+        case .listening: return "…"
+        case .thinking, .writing: return "…"
+        case .done: return "done"
+        case .error: return "error"
+        }
+    }
+
+    private var fullBody: some View {
         HStack(spacing: 10) {
             leading
             VStack(alignment: .leading, spacing: 2) {

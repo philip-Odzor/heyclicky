@@ -41,6 +41,14 @@ struct MenuBarContent: View {
     }
 
     private var statusSummary: String {
+        // Stealth: never leak transcript / error text / wake phrase in the menu.
+        if appState.settings.stealthEnabled {
+            switch appState.phase {
+            case .idle, .done: return "ready"
+            case .listening, .thinking, .writing: return "…"
+            case .error: return "error"
+            }
+        }
         if appState.wakeListening {
             return "wake word on — say “\(appState.settings.wakePhrase)”"
         }
